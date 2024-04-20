@@ -199,16 +199,16 @@ func (m *Prober) DoProbes(ctx context.Context, backends Backends) (ProbeState, e
 	if state, ok := func() (ProbeState, bool) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if ingState, ok := m.routeStates[backends.Key]; ok {
-			pstate := ProbeState{Version: ingState.version}
-			if ingState.version == backends.Version {
-				ingState.lastAccessed = time.Now()
-				pstate.Ready = ingState.pendingCount.Load() == 0
+		if routeState, ok := m.routeStates[backends.Key]; ok {
+			pstate := ProbeState{Version: routeState.version}
+			if routeState.version == backends.Version {
+				routeState.lastAccessed = time.Now()
+				pstate.Ready = routeState.pendingCount.Load() == 0
 				return pstate, true
 			}
 
 			// Cancel the polling for the outdated version
-			ingState.cancel()
+			routeState.cancel()
 			delete(m.routeStates, backends.Key)
 		}
 		return ProbeState{}, false
@@ -249,7 +249,10 @@ func (m *Prober) probeRequest(
 		key:          key,
 		callbackKey:  callbackKey,
 		lastAccessed: time.Now(),
-		cancel:       cancel,
+		cancel: func() {
+			logger.Infof("%s probing @ version (%s)was cancelled", key, version)
+			cancel()
+		},
 	}
 
 	workItems := make(map[string][]*workItem)

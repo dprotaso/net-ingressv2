@@ -39,6 +39,15 @@ spec:
     enableExternalNameService: true
     featureFlags:
     - "useEndpointSlices"
+  envoy:
+    logLevel: trace
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: 1000m
+        memory: 1000Mi
   contour:
     deployment:
       replicas: 1

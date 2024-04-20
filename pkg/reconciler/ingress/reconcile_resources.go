@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +39,7 @@ import (
 	netv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
 	"knative.dev/networking/pkg/http/header"
 	"knative.dev/pkg/controller"
+	"knative.dev/pkg/logging"
 )
 
 const listenerPrefix = "kni-"
@@ -64,11 +66,19 @@ func probeTargets(
 	}
 
 	for _, rule := range r.Spec.Rules {
+	match_loop:
 		for _, match := range rule.Matches {
 			for _, headers := range match.Headers {
 				// Skip non-probe matches
 				if headers.Name != header.HashKey {
 					continue
+				}
+
+				if visibility == netv1alpha1.IngressVisibilityClusterLocal {
+					host := resources.LongestHost(r.Spec.Hostnames)
+					url := url.URL{Host: string(host), Path: *match.Path.Value}
+					backends.AddURL(visibility, url)
+					continue match_loop
 				}
 
 				for _, hostname := range r.Spec.Hostnames {
@@ -148,9 +158,12 @@ func (c *Reconciler) reconcileHTTPRouteUpdate(
 	newBackends, oldBackends := computeBackends(httproute, rule)
 
 	if wasTransitionProbe && probeHash == hash && probe.Ready {
+		logging.FromContext(ctx).Infof("%s: was transitioning - final update %s", httproute.Name, hash)
 		desired, err = resources.MakeHTTPRoute(ctx, ing, rule)
 	} else if wasEndpointProbe && probeHash == hash && probe.Ready {
 		hash = transitionPrefix + hash
+
+		logging.FromContext(ctx).Infof("%s: was endpoint probe - transitioning %s", httproute.Name, hash)
 
 		desired, err = resources.MakeHTTPRoute(ctx, ing, rule)
 		resources.UpdateProbeHash(desired, hash)
@@ -162,8 +175,19 @@ func (c *Reconciler) reconcileHTTPRouteUpdate(
 		for _, backend := range oldBackends {
 			resources.AddOldBackend(desired, hash, backend)
 		}
+	} else if probeHash == hash {
+		logging.FromContext(ctx).Infof("%s: noop", httproute.Name)
+		// noop - preserve current probing
+		if probe.Version != "" && probe.Version != hash {
+			logging.FromContext(ctx).Infof("%s: replacing hash %q with probe %q", httproute.Name, hash, probe.Version)
+			hash = probe.Version
+		}
+		return httproute, probeTargets(hash, ing, rule, httproute), nil
 	} else if len(newBackends) > 0 {
 		hash = endpointPrefix + hash
+		logging.FromContext(ctx).Infof("%s: new backends present %d - new hash %q - old probe %q", httproute.Name, len(newBackends), hash, probe.Version)
+		logging.FromContext(ctx).Infof("%s: resource version %s", httproute.Name, httproute.ResourceVersion)
+
 		desired = httproute.DeepCopy()
 		resources.UpdateProbeHash(desired, hash)
 		resources.RemoveEndpointProbes(desired)
@@ -173,14 +197,11 @@ func (c *Reconciler) reconcileHTTPRouteUpdate(
 		for _, backend := range oldBackends {
 			resources.AddOldBackend(desired, hash, backend)
 		}
-	} else if probeHash != hash {
-		desired, err = resources.MakeHTTPRoute(ctx, ing, rule)
 	} else {
-		// noop - preserve current probing
-		if probe.Version != "" {
-			hash = probe.Version
-		}
-		return httproute, probeTargets(hash, ing, rule, httproute), nil
+		// No new backends & probe hash is not the same as ingress hash
+		// This occurs when we reconcile after a create (eg. HTTPRoute has some new status)
+		logging.FromContext(ctx).Infof("%s: hash %q doesn't equal probe.version %q - recreating", httproute.Name, hash, probeHash)
+		desired, err = resources.MakeHTTPRoute(ctx, ing, rule)
 	}
 
 	if err != nil {
@@ -191,6 +212,8 @@ func (c *Reconciler) reconcileHTTPRouteUpdate(
 		!equality.Semantic.DeepEqual(original.Annotations, desired.Annotations) ||
 		!equality.Semantic.DeepEqual(original.Labels, desired.Labels) {
 
+		logging.FromContext(ctx).Infof("%s: updating route %s", original.Name, cmp.Diff(original.Spec, desired.Spec))
+
 		// Don't modify the informers copy.
 		original.Spec = desired.Spec
 		original.Annotations = desired.Annotations
@@ -198,6 +221,8 @@ func (c *Reconciler) reconcileHTTPRouteUpdate(
 
 		updated, err := c.gwapiclient.GatewayV1().HTTPRoutes(original.Namespace).
 			Update(ctx, original, metav1.UpdateOptions{})
+
+		logging.FromContext(ctx).Infof("%s: httproute updated resource version %s", httproute.Name, updated.ResourceVersion)
 
 		if err != nil {
 			recorder.Eventf(ing, corev1.EventTypeWarning, "UpdateFailed", "Failed to update HTTPRoute: %v", err)

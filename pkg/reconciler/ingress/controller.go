@@ -19,17 +19,23 @@ package ingress
 import (
 	"context"
 
+	"github.com/google/go-cmp/cmp"
+	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 
 	"knative.dev/networking/pkg/apis/networking"
+	"knative.dev/networking/pkg/apis/networking/v1alpha1"
 	ingressinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/ingress"
 	ingressreconciler "knative.dev/networking/pkg/client/injection/reconciler/networking/v1alpha1/ingress"
 	networkcfg "knative.dev/networking/pkg/config"
+	"knative.dev/networking/pkg/ingress"
 	endpointsinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/endpoints"
+	podinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
+	"knative.dev/pkg/logging/logkey"
 	"knative.dev/pkg/reconciler"
 
 	gwapiclient "knative.dev/net-gateway-api/pkg/client/injection/client"
@@ -58,6 +64,7 @@ func NewController(
 	referenceGrantInformer := referencegrantinformer.Get(ctx)
 	gatewayInformer := gatewayinformer.Get(ctx)
 	endpointsInformer := endpointsinformer.Get(ctx)
+	podInformer := podinformer.Get(ctx)
 
 	c := &Reconciler{
 		gwapiclient:          gwapiclient.Get(ctx),
@@ -91,6 +98,35 @@ func NewController(
 	}
 
 	ingressInformer.Informer().AddEventHandler(ingressHandler)
+	ingressInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			var old, nu interface{}
+			var oldHash, nuHash string
+			var key string
+			if oldObj != nil {
+				o := oldObj.(*v1alpha1.Ingress).DeepCopy()
+				old = o.Spec.DeepCopy()
+				oldHash, _ = ingress.InsertProbe(o)
+			}
+
+			if newObj != nil {
+				o := newObj.(*v1alpha1.Ingress).DeepCopy()
+				nu = o.Spec.DeepCopy()
+				nuHash, _ = ingress.InsertProbe(o)
+				key = types.NamespacedName{
+					Namespace: o.Namespace,
+					Name:      o.Name,
+				}.String()
+			}
+
+			logger.With(zap.String(logkey.Key, key)).Infof("diff ingress %s -> %s: %s",
+				oldHash,
+				nuHash,
+				cmp.Diff(old, nu),
+			)
+
+		},
+	})
 
 	httprouteInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: filterFunc,
@@ -111,9 +147,19 @@ func NewController(
 	c.statusManager = statusProber
 	statusProber.Start(ctx.Done())
 
+	// Cancel probing when an Ingress is deleted
+	ingressInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		DeleteFunc: statusProber.CancelIngressProbing,
+	})
+
 	// Make sure trackers are deleted once the observers are removed.
 	ingressInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		DeleteFunc: impl.Tracker.OnDeletedObserver,
+	})
+
+	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		// Cancel probing when a Pod is deleted
+		DeleteFunc: statusProber.CancelPodProbing,
 	})
 
 	return impl

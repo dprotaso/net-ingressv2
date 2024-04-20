@@ -40,6 +40,14 @@ spec:
     featureFlags:
     - "useEndpointSlices"
   envoy:
+    logLevel: trace
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: 1000m
+        memory: 1000Mi
     networkPublishing:
       type: ClusterIPService
   contour:

@@ -28,6 +28,7 @@ import (
 	"knative.dev/networking/pkg/apis/networking/v1alpha1"
 	ingressreconciler "knative.dev/networking/pkg/client/injection/reconciler/networking/v1alpha1/ingress"
 	"knative.dev/networking/pkg/ingress"
+	"knative.dev/pkg/logging"
 	"knative.dev/pkg/network"
 	pkgreconciler "knative.dev/pkg/reconciler"
 
@@ -65,6 +66,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, ingress *v1alpha1.Ingres
 	reconcileErr := c.reconcileIngress(ctx, ingress)
 
 	if reconcileErr != nil {
+		logging.FromContext(ctx).Info("BLAH=== ", reconcileErr)
 		ingress.Status.MarkIngressNotReady(notReconciledReason, notReconciledMessage)
 		return reconcileErr
 	}
